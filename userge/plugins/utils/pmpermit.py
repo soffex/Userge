@@ -11,7 +11,7 @@
 import asyncio
 from typing import Dict
 
-from userge import userge, Filters, Message, Config, get_collection
+from userge import userge, filters, Message, Config, get_collection
 from userge.utils import SafeDict
 
 CHANNEL = userge.getCLogger(__name__)
@@ -19,15 +19,15 @@ SAVED_SETTINGS = get_collection("CONFIGS")
 ALLOWED_COLLECTION = get_collection("PM_PERMIT")
 
 pmCounter: Dict[int, int] = {}
-allowAllFilter = Filters.create(lambda _, __: Config.ALLOW_ALL_PMS)
-noPmMessage = ("Hello {fname} this is an automated message\n"
-               "Please wait untill you get approved to direct message "
-               "And please dont spam untill then ")
-blocked_message = "**You were automatically blocked**"
+allowAllFilter = filters.create(lambda _, __, ___: Config.ALLOW_ALL_PMS)
+noPmMessage = bk_noPmMessage = ("Hello {fname} this is an automated message\n"
+                                "Please wait until you get approved to direct message "
+                                "And please dont spam until then ")
+blocked_message = bk_blocked_message = "**You were automatically blocked**"
 
 
 async def _init() -> None:
-    global noPmMessage, blocked_message
+    global noPmMessage, blocked_message  # pylint: disable=global-statement
     async for chat in ALLOWED_COLLECTION.find({"status": 'allowed'}):
         Config.ALLOWED_CHATS.add(chat.get("_id"))
     _pm = await SAVED_SETTINGS.find_one({'_id': 'PM GUARD STATUS'})
@@ -112,10 +112,10 @@ async def get_id(message: Message):
                        "You can switch pmguard On or Off with this command. "
                        "When you turn on this next time, "
                        "the previously allowed chats will be there !"},
-    allow_channels=False, allow_via_bot=False)
+    allow_channels=False)
 async def pmguard(message: Message):
     """ enable or disable auto pm handler """
-    global pmCounter
+    global pmCounter  # pylint: disable=global-statement
     if Config.ALLOW_ALL_PMS:
         Config.ALLOW_ALL_PMS = False
         await message.edit("`PM_guard activated`", del_in=3, log=__name__)
@@ -130,56 +130,66 @@ async def pmguard(message: Message):
 @userge.on_cmd("setpmmsg", about={
     'header': "Sets the reply message",
     'description': "You can change the default message which userge gives on un-invited PMs",
+    'flags': {'-r': "reset to default"},
     'options': {
         '{fname}': "add first name",
         '{lname}': "add last name",
         '{flname}': "add full name",
         '{uname}': "username",
         '{chat}': "chat name",
-        '{mention}': "mention user"}}, allow_channels=False, allow_via_bot=False)
+        '{mention}': "mention user"}}, allow_channels=False)
 async def set_custom_nopm_message(message: Message):
     """ setup custom pm message """
-    global noPmMessage
-    await message.edit('`Custom NOpm message saved`', del_in=3, log=__name__)
-    if message.reply_to_message:
-        string = message.reply_to_message.text
+    global noPmMessage  # pylint: disable=global-statement
+    if '-r' in message.flags:
+        await message.edit('`Custom NOpm message reset`', del_in=3, log=True)
+        noPmMessage = bk_noPmMessage
+        await SAVED_SETTINGS.find_one_and_delete({'_id': 'CUSTOM NOPM MESSAGE'})
     else:
-        string = message.input_str
-    if string:
-        noPmMessage = string
-        await SAVED_SETTINGS.update_one(
-            {'_id': 'CUSTOM NOPM MESSAGE'}, {"$set": {'data': string}}, upsert=True)
+        string = message.input_or_reply_raw
+        if string:
+            await message.edit('`Custom NOpm message saved`', del_in=3, log=True)
+            noPmMessage = string
+            await SAVED_SETTINGS.update_one(
+                {'_id': 'CUSTOM NOPM MESSAGE'}, {"$set": {'data': string}}, upsert=True)
+        else:
+            await message.err("invalid input!")
 
 
 @userge.on_cmd("setbpmmsg", about={
     'header': "Sets the block message",
     'description': "You can change the default blockPm message "
                    "which userge gives on un-invited PMs",
+    'flags': {'-r': "reset to default"},
     'options': {
         '{fname}': "add first name",
         '{lname}': "add last name",
         '{flname}': "add full name",
         '{uname}': "username",
         '{chat}': "chat name",
-        '{mention}': "mention user"}}, allow_channels=False, allow_via_bot=False)
+        '{mention}': "mention user"}}, allow_channels=False)
 async def set_custom_blockpm_message(message: Message):
     """ setup custom blockpm message """
-    global blocked_message
-    await message.edit('`Custom BLOCKpm message saved`', del_in=3, log=__name__)
-    if message.reply_to_message:
-        string = message.reply_to_message.text
+    global blocked_message  # pylint: disable=global-statement
+    if '-r' in message.flags:
+        await message.edit('`Custom BLOCKpm message reset`', del_in=3, log=True)
+        blocked_message = bk_blocked_message
+        await SAVED_SETTINGS.find_one_and_delete({'_id': 'CUSTOM BLOCKPM MESSAGE'})
     else:
-        string = message.input_str
-    if string:
-        blocked_message = string
-        await SAVED_SETTINGS.update_one(
-            {'_id': 'CUSTOM BLOCKPM MESSAGE'}, {"$set": {'data': string}}, upsert=True)
+        string = message.input_or_reply_raw
+        if string:
+            await message.edit('`Custom BLOCKpm message saved`', del_in=3, log=True)
+            blocked_message = string
+            await SAVED_SETTINGS.update_one(
+                {'_id': 'CUSTOM BLOCKPM MESSAGE'}, {"$set": {'data': string}}, upsert=True)
+        else:
+            await message.err("invalid input!")
 
 
 @userge.on_cmd(
     "vpmmsg", about={
         'header': "Displays the reply message for uninvited PMs"},
-    allow_channels=False, allow_via_bot=False)
+    allow_channels=False)
 async def view_current_noPM_msg(message: Message):
     """ view current pm message """
     await message.edit(f"--current PM message--\n\n{noPmMessage}")
@@ -188,14 +198,14 @@ async def view_current_noPM_msg(message: Message):
 @userge.on_cmd(
     "vbpmmsg", about={
         'header': "Displays the reply message for blocked PMs"},
-    allow_channels=False, allow_via_bot=False)
+    allow_channels=False)
 async def view_current_blockPM_msg(message: Message):
     """ view current block pm message """
     await message.edit(f"--current blockPM message--\n\n{blocked_message}")
 
 
-@userge.on_filters(~allowAllFilter & Filters.incoming & Filters.private & ~Filters.bot
-                   & ~Filters.me & ~Filters.service & ~Config.ALLOWED_CHATS, allow_via_bot=False)
+@userge.on_filters(~allowAllFilter & filters.incoming & filters.private & ~filters.bot
+                   & ~filters.me & ~filters.service & ~Config.ALLOWED_CHATS, allow_via_bot=False)
 async def uninvitedPmHandler(message: Message):
     """ pm message handler """
     user_dict = await userge.get_user_dict(message.from_user.id)
@@ -214,7 +224,7 @@ async def uninvitedPmHandler(message: Message):
             pmCounter[message.from_user.id] += 1
             await message.reply(
                 f"You have {pmCounter[message.from_user.id]} out of 4 **Warnings**\n"
-                "Please wait untill you get aprroved to pm !", del_in=5)
+                "Please wait until you get approved to pm !", del_in=5)
     else:
         pmCounter.update({message.from_user.id: 1})
         await message.reply(
@@ -223,8 +233,8 @@ async def uninvitedPmHandler(message: Message):
         await CHANNEL.log(f"#NEW_MESSAGE\n{user_dict['mention']} has messaged you")
 
 
-@userge.on_filters(~allowAllFilter & Filters.outgoing
-                   & Filters.private & ~Config.ALLOWED_CHATS, allow_via_bot=False)
+@userge.on_filters(~allowAllFilter & filters.outgoing
+                   & filters.private & ~Config.ALLOWED_CHATS, allow_via_bot=False)
 async def outgoing_auto_approve(message: Message):
     """ outgoing handler """
     userID = message.chat.id

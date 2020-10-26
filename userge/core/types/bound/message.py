@@ -12,16 +12,15 @@ __all__ = ['Message']
 
 import re
 import asyncio
-from typing import List, Dict, Union, Optional, Sequence
+from typing import List, Dict, Tuple, Union, Optional, Sequence
 
-from pyrogram import InlineKeyboardMarkup, Message as RawMessage
+from pyrogram.types import InlineKeyboardMarkup, Message as RawMessage
 from pyrogram.errors.exceptions import MessageAuthorRequired, MessageTooLong
 from pyrogram.errors.exceptions.bad_request_400 import MessageNotModified, MessageIdInvalid
 from pyrogram.errors.exceptions.forbidden_403 import MessageDeleteForbidden
 
 from userge import logging
 from ... import client as _client  # pylint: disable=unused-import
-from ..new import ChannelLogger
 
 _CANCEL_LIST: List[int] = []
 _ERROR_MSG_DELETE_TIMEOUT = 5
@@ -31,33 +30,32 @@ _LOG = logging.getLogger(__name__)
 _LOG_STR = "<<<!  :::::  %s  :::::  !>>>"
 
 
-def _msg_to_dict(message: RawMessage) -> Dict[str, object]:
-    kwargs_ = vars(message)
-    del message
-    for key_ in ['_client', '_channel', '_filtered', '_process_canceled',
-                 'client', '_filtered_input_str', '_flags', '_kwargs']:
-        if key_ in kwargs_:
-            del kwargs_[key_]
-    return kwargs_
-
-
 class Message(RawMessage):
     """ Modded Message Class For Userge """
     def __init__(self,
                  client: Union['_client.Userge', '_client._UsergeBot'],
-                 message: RawMessage,
-                 **kwargs: Union[str, bool]) -> None:
-        super().__init__(client=client, **_msg_to_dict(message))
-        self.message_id: int
-        self.reply_to_message: Optional[RawMessage]
-        if self.reply_to_message:
-            self.reply_to_message = self.__class__(self._client, self.reply_to_message)
-        self._channel = ChannelLogger(client, "CORE")
+                 mvars: Dict[str, object], module: str, **kwargs: Union[str, bool]) -> None:
         self._filtered = False
-        self._process_canceled = False
-        self._filtered_input_str: str = ''
+        self._filtered_input_str = ''
         self._flags: Dict[str, str] = {}
+        self._process_canceled = False
+        self._module = module
         self._kwargs = kwargs
+        super().__init__(client=client, **mvars)
+
+    @classmethod
+    def parse(cls, client: Union['_client.Userge', '_client._UsergeBot'],
+              message: RawMessage, **kwargs: Union[str, bool]) -> 'Message':
+        """ parse message """
+        mvars = vars(message)
+        del message
+        for key_ in ['_client', '_filtered', '_filtered_input_str',
+                     '_flags', '_process_canceled', '_module', '_kwargs']:
+            if key_ in mvars:
+                del mvars[key_]
+        if mvars['reply_to_message']:
+            mvars['reply_to_message'] = cls.parse(client, mvars['reply_to_message'], **kwargs)
+        return cls(client, mvars, **kwargs)
 
     @property
     def client(self) -> Union['_client.Userge', '_client._UsergeBot']:
@@ -65,19 +63,38 @@ class Message(RawMessage):
         return self._client
 
     @property
-    def input_str(self) -> str:
-        """ Returns the input string without command """
-        input_ = self.text.html
+    def input_raw(self) -> str:
+        """ Returns the input string without command as raw """
+        input_ = self.text.html if hasattr(self.text, 'html') else self.text
         if ' ' in input_ or '\n' in input_:
             return str(input_.split(maxsplit=1)[1].strip())
         return ''
+
+    @property
+    def input_str(self) -> str:
+        """ Returns the input string without command """
+        input_ = self.text
+        if ' ' in input_ or '\n' in input_:
+            return str(input_.split(maxsplit=1)[1].strip())
+        return ''
+
+    @property
+    def input_or_reply_raw(self) -> str:
+        """ Returns the input string  or replied msg text without command as raw """
+        input_ = self.input_raw
+        if not input_ and self.reply_to_message:
+            input_ = (
+                self.reply_to_message.text.html if self.reply_to_message.text else
+                self.reply_to_message.caption.html if self.reply_to_message.caption else ''
+            ).strip()
+        return input_
 
     @property
     def input_or_reply_str(self) -> str:
         """ Returns the input string  or replied msg text without command """
         input_ = self.input_str
         if not input_ and self.reply_to_message:
-            input_ = (self.reply_to_message.text.html if self.reply_to_message.text else '').strip()
+            input_ = (self.reply_to_message.text or self.reply_to_message.caption or '').strip()
         return input_
 
     @property
@@ -100,28 +117,66 @@ class Message(RawMessage):
             self._process_canceled = True
         return self._process_canceled
 
+    @property
+    def extract_user_and_text(self) -> Tuple[Optional[Union[str, int]], Optional[str]]:
+        """ Extracts User and Text
+        [NOTE]: This method checks for reply first.
+        On Success:
+            user (``str | int | None``) and text (``str | None``)
+        """
+        user_e: Optional[Union[str, int]] = None
+        text: Optional[str] = None
+        if self.reply_to_message:
+            if self.reply_to_message.from_user:
+                user_e = self.reply_to_message.from_user.id
+            text = self.input_str
+            return user_e, text
+        if self.input_str:
+            data = self.input_str.split(maxsplit=1)
+            # Grab First Word and Process it.
+            if len(data) == 2:
+                user, text = data
+            elif len(data) == 1:
+                user = data[0]
+            # if user id, convert it to integer
+            if user.isdigit():
+                user_e = int(user)
+            elif self.entities:
+                # Extracting text mention entity and skipping if it's @ mention.
+                for mention in self.entities:
+                    # Catch first text mention
+                    if mention.type == "text_mention":
+                        user_e = mention.user.id
+                        break
+            # User @ Mention.
+            if user.startswith("@"):
+                user_e = user
+        return user_e, text
+
     def cancel_the_process(self) -> None:
         """ Set True to the self.process_is_canceled """
         _CANCEL_LIST.append(self.message_id)
 
     def _filter(self) -> None:
-        if not self._filtered:
-            prefix = str(self._kwargs.get('prefix', '-'))
-            del_pre = bool(self._kwargs.get('del_pre', False))
-            input_str = self.input_str
-            for i in input_str.strip().split():
-                match = re.match(f"({prefix}[a-zA-Z]+)([0-9]*)$", i)
-                if match:
-                    items: Sequence[str] = match.groups()
-                    self._flags[items[0].lstrip(prefix).lower() if del_pre
-                                else items[0].lower()] = items[1] or ''
-                else:
-                    self._filtered_input_str += ' ' + i
-            self._filtered_input_str = self._filtered_input_str.strip()
-            _LOG.debug(
-                _LOG_STR,
-                f"Filtered Input String => [ {self._filtered_input_str}, {self._flags} ]")
-            self._filtered = True
+        if self._filtered:
+            return
+
+        prefix = str(self._kwargs.get('prefix', '-'))
+        del_pre = bool(self._kwargs.get('del_pre', False))
+        input_str = self.input_str
+        for i in input_str.strip().split():
+            match = re.match(f"({prefix}[a-zA-Z]+)([0-9]*)$", i)
+            if match:
+                items: Sequence[str] = match.groups()
+                self._flags[items[0].lstrip(prefix).lower() if del_pre
+                            else items[0].lower()] = items[1] or ''
+            else:
+                self._filtered_input_str += ' ' + i
+        self._filtered_input_str = self._filtered_input_str.strip()
+        _LOG.debug(
+            _LOG_STR,
+            f"Filtered Input String => [ {self._filtered_input_str}, {self._flags} ]")
+        self._filtered = True
 
     async def send_as_file(self,
                            text: str,
@@ -160,6 +215,8 @@ class Message(RawMessage):
             else self.message_id
         if delete_message:
             asyncio.get_event_loop().create_task(self.delete())
+        if log and isinstance(log, bool):
+            log = self._module
         return await self._client.send_as_file(chat_id=self.chat.id,
                                                text=text,
                                                filename=filename,
@@ -237,6 +294,8 @@ class Message(RawMessage):
             quote = self.chat.type != "private"
         if reply_to_message_id is None and quote:
             reply_to_message_id = self.message_id
+        if log and isinstance(log, bool):
+            log = self._module
         return await self._client.send_message(chat_id=self.chat.id,
                                                text=text,
                                                del_in=del_in,
@@ -297,6 +356,8 @@ class Message(RawMessage):
         Raises:
             RPCError: In case of a Telegram RPC error.
         """
+        if log and isinstance(log, bool):
+            log = self._module
         try:
             return await self._client.edit_message_text(
                 chat_id=self.chat.id,
@@ -307,6 +368,8 @@ class Message(RawMessage):
                 parse_mode=parse_mode,
                 disable_web_page_preview=disable_web_page_preview,
                 reply_markup=reply_markup)
+        except MessageNotModified:
+            return self
         except (MessageAuthorRequired, MessageIdInvalid) as m_er:
             if sudo:
                 msg = await self.reply(text=text,
@@ -320,7 +383,7 @@ class Message(RawMessage):
                 return msg
             raise m_er
 
-    edit_text = edit
+    edit_text = try_to_edit = edit
 
     async def force_edit(self,
                          text: str,
@@ -500,69 +563,6 @@ class Message(RawMessage):
                                      disable_web_page_preview=disable_web_page_preview,
                                      reply_markup=reply_markup,
                                      **kwargs)
-
-    async def try_to_edit(self,
-                          text: str,
-                          del_in: int = -1,
-                          log: Union[bool, str] = False,
-                          sudo: bool = True,
-                          parse_mode: Union[str, object] = object,
-                          disable_web_page_preview: Optional[bool] = None,
-                          reply_markup: InlineKeyboardMarkup = None) -> Union['Message', bool]:
-        """\nThis will first try to message.edit.
-        If it raise MessageNotModified error,
-        just pass it.
-
-        Example:
-                message.try_to_edit("hello")
-
-        Parameters:
-            text (``str``):
-                New text of the message.
-
-            del_in (``int``):
-                Time in Seconds for delete that message.
-
-            log (``bool`` | ``str``, *optional*):
-                If ``True``, the message will be forwarded
-                to the log channel.
-                If ``str``, the logger name will be updated.
-
-            sudo (``bool``, *optional*):
-                If ``True``, sudo users supported.
-
-            parse_mode (``str``, *optional*):
-                By default, texts are parsed using
-                both Markdown and HTML styles.
-                You can combine both syntaxes together.
-                Pass "markdown" or "md" to enable
-                Markdown-style parsing only.
-                Pass "html" to enable HTML-style parsing only.
-                Pass None to completely disable style parsing.
-
-            disable_web_page_preview (``bool``, *optional*):
-                Disables link previews for links in this message.
-
-            reply_markup (:obj:`InlineKeyboardMarkup`, *optional*):
-                An InlineKeyboardMarkup object.
-
-        Returns:
-            On success, the edited
-            :obj:`Message` or True is returned.
-
-        Raises:
-            RPCError: In case of a Telegram RPC error.
-        """
-        try:
-            return await self.edit(text=text,
-                                   del_in=del_in,
-                                   log=log,
-                                   sudo=sudo,
-                                   parse_mode=parse_mode,
-                                   disable_web_page_preview=disable_web_page_preview,
-                                   reply_markup=reply_markup)
-        except MessageNotModified:
-            return False
 
     async def edit_or_send_as_file(self,
                                    text: str,

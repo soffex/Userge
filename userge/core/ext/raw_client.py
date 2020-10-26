@@ -10,19 +10,21 @@
 
 __all__ = ['RawClient']
 
+import time
 from typing import Optional
 
-import nest_asyncio
 from pyrogram import Client
 
-from .. import types, client
+import userge  # pylint: disable=unused-import
 
 
 class RawClient(Client):
     """ userge raw client """
-    def __init__(self, bot: Optional['client._UsergeBot'] = None, **kwargs) -> None:
+    DUAL_MODE = False
+    LAST_OUTGOING_TIME = time.time()
+
+    def __init__(self, bot: Optional['userge.core.client._UsergeBot'] = None, **kwargs) -> None:
         self._bot = bot
         super().__init__(**kwargs)
-        self._channel = types.new.ChannelLogger(self, "CORE")
-        types.new.Conversation.init(self)
-        nest_asyncio.apply()
+        self._channel = userge.core.types.new.ChannelLogger(self, "CORE")
+        userge.core.types.new.Conversation.init(self)
